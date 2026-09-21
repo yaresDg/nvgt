@@ -70,7 +70,7 @@ elif env["NVGT_TARGET"] == "linux":
 elif env["NVGT_TARGET"] == "android":
 	SConscript("build/android_sconscript.py", exports = ["env"])
 	env.Append(LIBS = common_libs + ["z", "GLESv1_CM", "GLESv2", "OpenSLES", "log", "android"])
-env.Append(CPPDEFINES = ["POCO_STATIC", "POCO_NO_AUTOMATIC_LIBS", "UNIVERSAL_SPEECH_STATIC", "PRISM_STATIC", "DEBUG" if ARGUMENTS.get("debug", "0") == "1" else "NDEBUG", "UNICODE"])
+env.Append(CPPDEFINES = ["POCO_STATIC", "POCO_NO_AUTOMATIC_LIBS", "PRISM_STATIC", "DEBUG" if ARGUMENTS.get("debug", "0") == "1" else "NDEBUG", "UNICODE"])
 env.Append(CPPPATH = ["#ASAddon/include", "#dep"], LIBPATH = ["#build/lib"])
 env["PLUGIN_DEST_DIR"] = "#release/lib_android" if env["NVGT_TARGET"] == "android" else "#release/lib"
 
@@ -109,7 +109,7 @@ if  ARGUMENTS.get("no_plugins", "0") == "0":
 
 # Project libraries
 env.Append(LIBS = ["deps"] + common_libs + ["zs" if env["NVGT_TARGET"] == "windows" else "z", "SDL3", "phonon", "ASAddon"])
-if env["NVGT_TARGET"] == "windows": env.Append(LIBS = ["UniversalSpeechStatic", "prism", "byctrl", "PCTalker", "PrismOrcaBridge", "PrismSpeechDispatcherBridge", "ZDSR"])
+if env["NVGT_TARGET"] == "windows": env.Append(LIBS = ["prism", "byctrl", "PCTalker", "PrismOrcaBridge", "PrismSpeechDispatcherBridge", "ZDSR"])
 elif env["NVGT_TARGET"] == "linux": env.Append(LIBS = ["prism"])
 
 # nvgt itself
