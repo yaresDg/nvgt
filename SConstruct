@@ -52,7 +52,7 @@ if env["NVGT_TARGET"] == "windows":
 	deb_rel_flags = ["/MTd", "/Od", "/Z7"] if ARGUMENTS.get("debug", "0") == "1" else ["/MT", "/O2"]
 	env.Append(CCFLAGS = ["/EHsc", "/J", "/utf-8", "/Gy", "/std:c++20", "/GF", "/Zc:inline", "/bigobj", "/permissive-", "/W3" if ARGUMENTS.get("warnings", "0") == "1" else "", "/WX" if ARGUMENTS.get("warnings_as_errors", "0") == "1" else ""] + deb_rel_flags)
 	env.Append(LINKFLAGS = ["/NOEXP", "/NOIMPLIB"], no_import_lib = 1)
-	env.Append(LIBS = ["Kernel32", "User32", "imm32", "OneCoreUAP", "dinput8", "dxguid", "gdi32", "winspool", "shell32", "iphlpapi", "ole32", "oleaut32", "delayimp", "uuid", "comdlg32", "advapi32", "netapi32", "winmm", "version", "crypt32", "bcrypt", "normaliz", "wldap32", "ws2_32", "ntdll"])
+	env.Append(LIBS = ["Kernel32", "User32", "imm32", "OneCoreUAP", "dinput8", "dxguid", "gdi32", "winspool", "shell32", "iphlpapi", "ole32", "oleaut32", "delayimp", "uuid", "comdlg32", "advapi32", "netapi32", "winmm", "version", "crypt32", "bcrypt", "normaliz", "wldap32", "ws2_32", "ntdll", "Rpcrt4", "Uiautomationcore", "onecore"])
 else:
 	env.Append(CXXFLAGS = ["-fms-extensions", "-std=c++20", "-fpermissive", "-O0" if ARGUMENTS.get("debug", 0) == "1" else "-O3", "-Wno-narrowing", "-Wno-int-to-pointer-cast", "-Wno-delete-incomplete", "-Wno-unused-result", "-g" if ARGUMENTS.get("debug", 0) == "1" else "", "-Wall" if ARGUMENTS.get("warnings", "0") == "1" else "", "-Wextra" if ARGUMENTS.get("warnings", "0") == "1" else "", "-Werror" if ARGUMENTS.get("warnings_as_errors", "0") == "1" else ""], LIBS = ["m"])
 if env["NVGT_TARGET"] == "macos":
@@ -70,7 +70,7 @@ elif env["NVGT_TARGET"] == "linux":
 elif env["NVGT_TARGET"] == "android":
 	SConscript("build/android_sconscript.py", exports = ["env"])
 	env.Append(LIBS = common_libs + ["z", "GLESv1_CM", "GLESv2", "OpenSLES", "log", "android"])
-env.Append(CPPDEFINES = ["POCO_STATIC", "POCO_NO_AUTOMATIC_LIBS", "UNIVERSAL_SPEECH_STATIC", "DEBUG" if ARGUMENTS.get("debug", "0") == "1" else "NDEBUG", "UNICODE"])
+env.Append(CPPDEFINES = ["POCO_STATIC", "POCO_NO_AUTOMATIC_LIBS", "UNIVERSAL_SPEECH_STATIC", "PRISM_STATIC", "DEBUG" if ARGUMENTS.get("debug", "0") == "1" else "NDEBUG", "UNICODE"])
 env.Append(CPPPATH = ["#ASAddon/include", "#dep"], LIBPATH = ["#build/lib"])
 env["PLUGIN_DEST_DIR"] = "#release/lib_android" if env["NVGT_TARGET"] == "android" else "#release/lib"
 
@@ -109,7 +109,8 @@ if  ARGUMENTS.get("no_plugins", "0") == "0":
 
 # Project libraries
 env.Append(LIBS = ["deps"] + common_libs + ["zs" if env["NVGT_TARGET"] == "windows" else "z", "SDL3", "phonon", "ASAddon"])
-if env["NVGT_TARGET"] == "windows": env.Append(LIBS = ["UniversalSpeechStatic"])
+if env["NVGT_TARGET"] == "windows": env.Append(LIBS = ["UniversalSpeechStatic", "prism", "byctrl", "PCTalker", "PrismOrcaBridge", "PrismSpeechDispatcherBridge", "ZDSR"])
+elif env["NVGT_TARGET"] == "linux": env.Append(LIBS = ["prism"])
 
 # nvgt itself
 sources = [str(i)[4:] for i in Glob("src/*.cpp")]
@@ -124,7 +125,8 @@ VariantDir("build/obj_src", "src", duplicate = 0)
 env.Append(CPPDEFINES = ["NVGT_BUILDING", "NO_OBFUSCATE"])
 if env["NVGT_TARGET"] == "windows":
 	deb_rel_flags = ["/DEBUG", "/INCREMENTAL:NO"] if ARGUMENTS.get("debug", "0") == "1" else ["/OPT:ICF=3"]
-	env.Append(CPPDEFINES = ["_SILENCE_CXX20_OLD_SHARED_PTR_ATOMIC_SUPPORT_DEPRECATION_WARNING"], LINKFLAGS = ["/ignore:4099", "/delayload:phonon.dll"] + deb_rel_flags)
+	# /WHOLEARCHIVE is required for prism: its backends self register through global constructors that MSVC drops from static libraries unless every object is pulled in, and /delayload keeps the reader specific bridge DLLs optional at runtime.
+	env.Append(CPPDEFINES = ["_SILENCE_CXX20_OLD_SHARED_PTR_ATOMIC_SUPPORT_DEPRECATION_WARNING"], LINKFLAGS = ["/ignore:4099", "/delayload:phonon.dll", "/WHOLEARCHIVE:prism.lib", "/delayload:byctrl-x64.dll", "/delayload:PCTKUSR.dll", "/delayload:ZDSRAPI_x64.dll", "/delayload:prism_orca_bridge.dll", "/delayload:prism_speech_dispatcher_bridge.dll"] + deb_rel_flags)
 elif env["NVGT_TARGET"] in ("macos", "ios"):
 	sources.append("apple.mm")
 	# We must link Apple frameworks here rather than above in the system libraries section to insure that they don't get linked with random plugins.
