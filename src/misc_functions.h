@@ -21,9 +21,13 @@ class process;
 
 asINT64 GetFileSize(const std::string& path);
 bool ChDir(const std::string& d);
+// These are namespaced because prism's static library vendors identical range conversion helpers for its own backends, and the two definitions must not collide at link time. The using declaration keeps normal unqualified calls working as always.
+namespace nvgt {
 double range_convert(double old_value, double old_min, double old_max, double new_min, double new_max);
 float range_convert(float old_value, float old_min, float old_max, float new_min, float new_max);
 float range_convert_midpoint(float old_value, float old_min, float old_midpoint, float old_max, float new_min, float new_midpoint, float new_max);
+}
+using namespace nvgt;
 float fRound(float n, int p);
 float parse_float(const std::string& val);
 double parse_double(const std::string& val);
