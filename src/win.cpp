@@ -24,7 +24,6 @@
 #include <fstream>
 #include <ctime>
 #include <iomanip>
-#include <stdexcept>
 #include "tts_prism.h"
 #include "win.h"
 
