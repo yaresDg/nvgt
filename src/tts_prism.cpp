@@ -40,8 +40,8 @@ static PrismContext *g_prism_context = nullptr;
 static PrismContext *prism_get_context() {
 	lock_guard<mutex> lock(g_prism_mutex);
 	if (!g_prism_context) {
-		g_prism_context = prism_init(nullptr); // A null config binds the context to the global registry of compiled in backends.
-		if (g_prism_context) atexit(prism_subsystem_shutdown); // Keeps this module self contained, no platform shutdown code needs to know prism exists. prism backends outliving the context remain valid, so engines destroyed later during static destruction are still safe.
+		g_prism_context = prism_init(nullptr);
+		if (g_prism_context) atexit(prism_subsystem_shutdown);
 	}
 	return g_prism_context;
 }
@@ -53,7 +53,7 @@ void prism_subsystem_shutdown() {
 		ctx = g_prism_context;
 		g_prism_context = nullptr;
 	}
-	prism_shutdown(ctx); // Accepts null.
+	prism_shutdown(ctx);
 }
 
 // Receives synthesized audio from prism_backend_speak_to_memory. Prism may invoke it any number of times and from any thread, but guarantees no further calls once speak_to_memory returns, so nothing more than an accumulator is needed.
@@ -72,9 +72,6 @@ static void PRISM_CALL pcm_accumulate(void *userdata, const float *samples, size
 	accumulator->samples.insert(accumulator->samples.end(), samples, samples + sample_count);
 }
 
-// Adapter presenting a single prism backend as an NVGT tts_engine.
-// Every adapter owns a dedicated prism backend instance (created with prism_registry_create rather than the caching acquire) so that each tts_voice gets isolated backend state such as voice selection and speech parameters.
-// Construction creates and initializes the backend, throwing on failure exactly like the old sapi5_engine did, which lets the engine factory and tts_voice::refresh() skip unavailable backends.
 class prism_tts_engine : public tts_engine_impl {
 	PrismBackend *backend;
 	uint64_t features;
@@ -106,7 +103,6 @@ public:
 	bool is_available() override { return backend != nullptr; }
 
 	tts_pcm_generation_state get_pcm_generation_state() override {
-		// Backends that can synthesize to memory go through NVGT's full pipeline (silence trimming, queued miniaudio playback), everything else speaks directly like the old speech dispatcher engine did.
 		return has_feature(PRISM_BACKEND_SUPPORTS_SPEAK_TO_MEMORY) ? PCM_PREFERRED : PCM_UNSUPPORTED;
 	}
 
@@ -134,7 +130,6 @@ public:
 		lock_guard<mutex> lock(backend_mutex);
 		PrismError err = prism_backend_speak(backend, text.c_str(), interrupt);
 		if (err != PRISM_OK) return false;
-		// Only backends that can report their state can honor a blocking speak, otherwise this returns immediately like the old speech dispatcher engine did.
 		if (blocking && has_feature(PRISM_BACKEND_SUPPORTS_IS_SPEAKING)) {
 			bool speaking = true;
 			while (speaking && prism_backend_is_speaking(backend, &speaking) == PRISM_OK)
@@ -219,7 +214,7 @@ public:
 		lock_guard<mutex> lock(backend_mutex);
 		const char *name = nullptr;
 		if (prism_backend_get_voice_name(backend, (size_t)index, &name) != PRISM_OK || !name) return "";
-		return string(name); // Prism owns the returned string and invalidates it on the next voice query, so copy it immediately.
+		return string(name);
 	}
 	string get_voice_language(int index) override {
 		if (!backend || index < 0 || !has_feature(PRISM_BACKEND_SUPPORTS_GET_VOICE_LANGUAGE)) return "";
@@ -270,14 +265,15 @@ void register_prism_tts_engines() {
 // Screen reader layer
 // ============================================================================
 // Everything below routes NVGT's screen_reader_* functions through an actual screen reader backend of prism (speech and braille as configured by the user's reader), never through plain TTS backends.
-// Windows only for now; linux joins once its prism build carries the orca/speech dispatcher backends, at which point linux.cpp's speech dispatcher based fake screen reader gets deleted.
-#if defined(_WIN32)
+// Windows uses its dedicated reader backends; linux and the BSDs use prism's Orca backend (the speech dispatcher based fake screen reader that used to live in linux.cpp is gone, speech dispatcher remains a plain TTS engine). macOS keeps apple.mm's VoiceOver implementation, so it is excluded here.
+#if defined(_WIN32) || !defined(__APPLE__)
 
 // Every prism backend that represents a screen reader. Membership in this list, not the priorities themselves, decides what screen_reader_detect can find; the registry's own priority order decides which of them is tried first.
+#if defined(_WIN32)
 PrismBackendId g_sr_backend_ids[] = {
 	PRISM_BACKEND_NVDA,
 	PRISM_BACKEND_JAWS,
-	PRISM_BACKEND_UIA, // Speech and braille announcements through UI Automation, picked up by NVDA/JAWS/Narrator alike.
+	PRISM_BACKEND_UIA, 
 	PRISM_BACKEND_ZDSR,
 	PRISM_BACKEND_ZOOM_TEXT,
 	PRISM_BACKEND_BOY_PC_READER,
@@ -287,10 +283,16 @@ PrismBackendId g_sr_backend_ids[] = {
 	PRISM_BACKEND_WINDOW_EYES,
 	PRISM_BACKEND_ORCA, // Only initializes when running under wine with the Linux side reachable.
 };
+#else
+PrismBackendId g_sr_backend_ids[] = {
+	PRISM_BACKEND_ORCA,
+};
+#endif
 
 static mutex g_sr_mutex;
 static PrismBackend *g_sr_backend = nullptr; // Guarded by g_sr_mutex.
 
+#if defined(_WIN32)
 // Declared here rather than pulling in all of uiautomationcore.h for one function; exported by uiautomationcore.dll, which the build already links for prism's UIA backend.
 extern "C" BOOL WINAPI UiaClientsAreListening();
 
@@ -300,6 +302,7 @@ static bool sr_uia_reader_listening() {
 	if (!SystemParametersInfoW(SPI_GETSCREENREADER, 0, &flag, 0) || !flag) return false;
 	return UiaClientsAreListening() != FALSE;
 }
+#endif
 
 static bool sr_id_is_screen_reader(PrismBackendId id) {
 	for (PrismBackendId sr_id : g_sr_backend_ids) if (id == sr_id) return true;
@@ -329,7 +332,11 @@ static bool sr_select_backend() {
 			prism_backend_free(backend);
 			continue;
 		}
-		if (!(prism_backend_get_features(backend) & PRISM_BACKEND_IS_SUPPORTED_AT_RUNTIME) || (id == PRISM_BACKEND_UIA && !sr_uia_reader_listening())) {
+		if (!(prism_backend_get_features(backend) & PRISM_BACKEND_IS_SUPPORTED_AT_RUNTIME)
+#if defined(_WIN32)
+			|| (id == PRISM_BACKEND_UIA && !sr_uia_reader_listening())
+#endif
+		) {
 			prism_backend_free(backend);
 			continue;
 		}
@@ -344,7 +351,6 @@ static bool sr_error_invalidates_backend(PrismError err) {
 	return err == PRISM_ERROR_BACKEND_NOT_AVAILABLE || err == PRISM_ERROR_INTERNAL || err == PRISM_ERROR_NOT_INITIALIZED;
 }
 
-// The mutex is held across every operation below, both because prism backends are not thread safe and because a concurrent screen_reader_unload or error invalidation must not free a backend that is still being used.
 bool screen_reader_load() {
 	lock_guard<mutex> lock(g_sr_mutex);
 	if (!g_sr_backend) return sr_select_backend();

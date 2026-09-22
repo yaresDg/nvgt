@@ -11,19 +11,4 @@
  */
 
 #pragma once
-#include <string>
-#include "tts.h"
-
-bool screen_reader_is_speaking();
-
-class speechd_engine : public tts_engine_impl {
-	void* connection;
-	bool loaded;
-public:
-	speechd_engine();
-	virtual ~speechd_engine();
-	virtual bool is_available() override;
-	virtual bool speak(const std::string &text, bool interrupt = false, bool blocking = false) override;
-	virtual bool is_speaking() override;
-	virtual bool stop() override;
-};
+// Linux speech and screen reader access is implemented in tts_prism.cpp on top of prism, so this header carries no declarations of its own; the script visible screen_reader_* functions are declared in tts.h exactly as on every other platform.
