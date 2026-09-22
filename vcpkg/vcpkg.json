@@ -120,6 +120,11 @@
     "tinyexpr",
     "unordered-dense",
     "zlib",
-    "ethindp-prism"
+    "ethindp-prism",
+    {
+      "name": "ethindp-prism",
+      "features": ["orca", "speech-dispatcher"],
+      "platform": "linux"
+    }
   ]
 }
