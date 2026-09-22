@@ -118,10 +118,6 @@
     "steam-audio-official",
     "tiny-aes-c",
     "tinyexpr",
-    {
-      "name": "universalspeech",
-      "platform": "windows"
-    },
     "unordered-dense",
     "zlib",
     "ethindp-prism"
