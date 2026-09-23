@@ -66,7 +66,7 @@ elif env["NVGT_TARGET"] == "ios":
 	env["FRAMEWORKPREFIX"] = "-weak_framework"
 elif env["NVGT_TARGET"] == "linux":
 	# enable the gold linker, strip the resulting binaries, and add /usr/local/lib to the libpath because it seems we aren't finding libraries unless we do manually.
-	env.Append(CPPPATH = ["lindev/include", "/usr/local/include"], LIBPATH = ["lindev/lib", "/usr/local/lib", "/usr/lib/x86_64-linux-gnu"], LINKFLAGS = ["-fuse-ld=gold", "-g" if ARGUMENTS.get("debug", 0) == "1" else "-s"])
+	env.Append(CPPPATH = ["lindev/include", "/usr/local/include"], LIBPATH = ["lindev/lib", "/usr/local/lib", "/usr/lib", "/usr/lib/x86_64-linux-gnu"], LINKFLAGS = ["-fuse-ld=gold", "-g" if ARGUMENTS.get("debug", 0) == "1" else "-s"])
 elif env["NVGT_TARGET"] == "android":
 	SConscript("build/android_sconscript.py", exports = ["env"])
 	env.Append(LIBS = common_libs + ["z", "GLESv1_CM", "GLESv2", "OpenSLES", "log", "android"])
@@ -110,7 +110,7 @@ if  ARGUMENTS.get("no_plugins", "0") == "0":
 # Project libraries
 env.Append(LIBS = ["deps"] + common_libs + ["zs" if env["NVGT_TARGET"] == "windows" else "z", "SDL3", "phonon", "ASAddon"])
 if env["NVGT_TARGET"] == "windows": env.Append(LIBS = ["prism", "byctrl", "PCTalker", "PrismOrcaBridge", "PrismSpeechDispatcherBridge", "ZDSR"])
-elif env["NVGT_TARGET"] == "linux": env.Append(LIBS = ["prism"])
+elif env["NVGT_TARGET"] == "linux": env.Append(LIBS = ["prism", "speechd", "giomm-2.68", "glibmm-2.68", "sigc-3.0", "gio-2.0", "gmodule-2.0", "gobject-2.0", "glib-2.0"])
 
 # nvgt itself
 sources = [str(i)[4:] for i in Glob("src/*.cpp")]
@@ -125,8 +125,8 @@ VariantDir("build/obj_src", "src", duplicate = 0)
 env.Append(CPPDEFINES = ["NVGT_BUILDING", "NO_OBFUSCATE"])
 if env["NVGT_TARGET"] == "windows":
 	deb_rel_flags = ["/DEBUG", "/INCREMENTAL:NO"] if ARGUMENTS.get("debug", "0") == "1" else ["/OPT:ICF=3"]
-	# /WHOLEARCHIVE is required for prism: its backends self register through global constructors that MSVC drops from static libraries unless every object is pulled in, and /delayload keeps the reader specific bridge DLLs optional at runtime.
-	env.Append(CPPDEFINES = ["_SILENCE_CXX20_OLD_SHARED_PTR_ATOMIC_SUPPORT_DEPRECATION_WARNING"], LINKFLAGS = ["/ignore:4099", "/delayload:phonon.dll", "/WHOLEARCHIVE:prism.lib", "/delayload:byctrl-x64.dll", "/delayload:PCTKUSR.dll", "/delayload:ZDSRAPI_x64.dll", "/delayload:prism_orca_bridge.dll", "/delayload:prism_speech_dispatcher_bridge.dll"] + deb_rel_flags)
+	# prism pulls its own backends into the link through anchor directives embedded in prism.lib, so no /WHOLEARCHIVE is needed; /delayload keeps the reader specific bridge DLLs optional at runtime.
+	env.Append(CPPDEFINES = ["_SILENCE_CXX20_OLD_SHARED_PTR_ATOMIC_SUPPORT_DEPRECATION_WARNING"], LINKFLAGS = ["/ignore:4099", "/delayload:phonon.dll", "/delayload:byctrl-x64.dll", "/delayload:PCTKUSR.dll", "/delayload:ZDSRAPI_x64.dll", "/delayload:prism_orca_bridge.dll", "/delayload:prism_speech_dispatcher_bridge.dll"] + deb_rel_flags)
 elif env["NVGT_TARGET"] in ("macos", "ios"):
 	sources.append("apple.mm")
 	# We must link Apple frameworks here rather than above in the system libraries section to insure that they don't get linked with random plugins.
