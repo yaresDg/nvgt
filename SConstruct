@@ -125,8 +125,8 @@ VariantDir("build/obj_src", "src", duplicate = 0)
 env.Append(CPPDEFINES = ["NVGT_BUILDING", "NO_OBFUSCATE"])
 if env["NVGT_TARGET"] == "windows":
 	deb_rel_flags = ["/DEBUG", "/INCREMENTAL:NO"] if ARGUMENTS.get("debug", "0") == "1" else ["/OPT:ICF=3"]
-	# prism pulls its own backends into the link through anchor directives embedded in prism.lib, so no /WHOLEARCHIVE is needed; /delayload keeps the reader specific bridge DLLs optional at runtime.
-	env.Append(CPPDEFINES = ["_SILENCE_CXX20_OLD_SHARED_PTR_ATOMIC_SUPPORT_DEPRECATION_WARNING"], LINKFLAGS = ["/ignore:4099", "/delayload:phonon.dll", "/delayload:byctrl-x64.dll", "/delayload:PCTKUSR.dll", "/delayload:ZDSRAPI_x64.dll", "/delayload:prism_orca_bridge.dll", "/delayload:prism_speech_dispatcher_bridge.dll"] + deb_rel_flags)
+	# /WHOLEARCHIVE is required for prism: its backends self register through global constructors that MSVC drops from static libraries unless every object is pulled in, and /delayload keeps the reader specific bridge DLLs optional at runtime.
+	env.Append(CPPDEFINES = ["_SILENCE_CXX20_OLD_SHARED_PTR_ATOMIC_SUPPORT_DEPRECATION_WARNING"], LINKFLAGS = ["/ignore:4099", "/delayload:phonon.dll", "/WHOLEARCHIVE:prism.lib", "/delayload:byctrl-x64.dll", "/delayload:PCTKUSR.dll", "/delayload:ZDSRAPI_x64.dll", "/delayload:prism_orca_bridge.dll", "/delayload:prism_speech_dispatcher_bridge.dll"] + deb_rel_flags)
 elif env["NVGT_TARGET"] in ("macos", "ios"):
 	sources.append("apple.mm")
 	# We must link Apple frameworks here rather than above in the system libraries section to insure that they don't get linked with random plugins.
