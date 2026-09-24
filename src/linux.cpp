@@ -49,7 +49,7 @@ static bool g_sr_worker_running = false;
 static PrismBackend *g_sr_backend = nullptr; // Owned and only mutated by the worker.
 static string g_sr_name;
 static uint64_t g_sr_features = 0;
-static steady_clock::time_point g_sr_last_select; // Throttles reselection while no reader is installed.
+static chrono::steady_clock::time_point g_sr_last_select; // Throttles reselection while no reader is installed.
 
 static void sr_worker_loop();
 static void sr_stop_worker();
@@ -155,8 +155,8 @@ static void sr_stop_worker() {
 
 // Schedules a selection on the worker, throttled to one attempt per second: with no reader installed, scanning the registry on every call would probe its backends nonstop. Must be called with g_sr_mutex held.
 static void sr_request_select_locked() {
-	if (steady_clock::now() - g_sr_last_select < chrono::milliseconds(1000)) return;
-	g_sr_last_select = steady_clock::now();
+	if (chrono::steady_clock::now() - g_sr_last_select < chrono::milliseconds(1000)) return;
+	g_sr_last_select = chrono::steady_clock::now();
 	sr_start_worker_locked();
 	if (g_sr_queue.size() >= 32) g_sr_queue.pop_front(); // If the reader cannot keep up, the oldest pending work is dropped in favor of the newest.
 	g_sr_queue.push_back(sr_job{sr_job::kind::select, string(), false});
