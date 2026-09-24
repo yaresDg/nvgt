@@ -503,26 +503,50 @@ static void sr_worker_loop() {
 	} // Same rule on the way out: at worst the backend leaks during process teardown.
 }
 
-// Runs one output job, selecting a backend first if needed.
+// Runs one output job, selecting a backend first if needed. A job whose operation fails with an
+// invalidating error gets exactly one second chance on a freshly selected backend: a screen reader
+// which has just (re)started answers its endpoint queries right away, so a selection made during that
+// startup window succeeds while the reader is not accepting speech yet, and the first speak fails.
+// Without the retry the snapshot would stay cleared until prism fires another availability transition,
+// which does not happen while the reader keeps running, and since the screen_reader_* functions refuse
+// to enqueue work while the snapshot is not ready, nothing would ever select again: every announcement
+// would silently fall back to the plain TTS engines until the reader happened to be restarted again.
 static void sr_worker_run(const sr_job &job) {
 	lock_guard<mutex> lock(g_sr_backend_mutex);
 	if (!g_sr_backend) {
 		sr_select_backend_locked();
 		if (!g_sr_backend) return;
 	}
-	PrismError err;
-	switch (job.action) {
-		case sr_job::kind::speak: err = prism_backend_speak(g_sr_backend, job.text.c_str(), job.interrupt); break;
-		case sr_job::kind::output: err = prism_backend_output(g_sr_backend, job.text.c_str(), job.interrupt); break;
-		case sr_job::kind::braille: err = prism_backend_braille(g_sr_backend, job.text.c_str()); break;
-		case sr_job::kind::stop: err = prism_backend_stop(g_sr_backend); break;
-		default: return;
-	}
-	if (sr_error_invalidates_backend(err)) {
-		sr_release_backend_locked();
+	auto run_op = [&job]() -> PrismError {
+		switch (job.action) {
+			case sr_job::kind::speak: return prism_backend_speak(g_sr_backend, job.text.c_str(), job.interrupt);
+			case sr_job::kind::output: return prism_backend_output(g_sr_backend, job.text.c_str(), job.interrupt);
+			case sr_job::kind::braille: return prism_backend_braille(g_sr_backend, job.text.c_str());
+			case sr_job::kind::stop: return prism_backend_stop(g_sr_backend);
+			default: return PRISM_OK;
+		}
+	};
+	PrismError err = run_op();
+	if (!sr_error_invalidates_backend(err)) return;
+	sr_release_backend_locked();
+	{
 		lock_guard<mutex> state_lock(g_sr_state_mutex);
-		sr_state_clear_locked(sr_state::unknown); // The reader died or its environment vanished: let the next activity reselect.
+		sr_state_clear_locked(sr_state::unknown); // The reader died or its environment vanished.
 	}
+	if (g_sr_shutting_down) return;
+	sr_select_backend_locked();
+	if (!g_sr_backend) return; // Nothing usable to retry with: the snapshot stays down until the next transition or job.
+	err = run_op();
+	if (!sr_error_invalidates_backend(err)) return;
+	sr_release_backend_locked();
+	{
+		lock_guard<mutex> state_lock(g_sr_state_mutex);
+		sr_state_clear_locked(sr_state::unknown);
+	}
+	// The retry failed too. Leave behind one selection attempt so the snapshot flips back to ready as
+	// soon as the reader is actually usable again even if no further transition ever arrives; if the
+	// reader is really gone, the selection just fails and the layer stays dormant exactly as before.
+	sr_enqueue(sr_job::kind::select);
 }
 
 // A screen reader dying or its environment vanishing (NVDA exited, UIA window destroyed) leaves the cached backend permanently broken, so those errors invalidate it and the next call detects afresh. Unimplemented operations are normal per backend and keep the cache.
