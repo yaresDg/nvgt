@@ -28,10 +28,6 @@ struct prism_engine_mapping {
 };
 void prism_register_tts_engines(const prism_engine_mapping *map, size_t count);
 
-// Shuts down the global prism context. Registered automatically with atexit the first time the context is created, so nothing needs to call this during normal application exit.
-// Also safe to call explicitly at any point where no engine is actively being used, for example to force prism to release its resources early; the context is simply recreated on next use. Idempotent.
-void prism_subsystem_shutdown();
-
 // Returns the global prism context, creating it on first use. Thread safe.
 PrismContext *prism_get_context();
 

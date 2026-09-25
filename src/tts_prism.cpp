@@ -42,19 +42,8 @@ PrismContext *prism_get_context() {
 	if (!g_prism_context) {
 		PrismConfig config = prism_config_init();
 		g_prism_context = prism_init(&config);
-		if (g_prism_context) atexit(prism_subsystem_shutdown);
 	}
 	return g_prism_context;
-}
-
-void prism_subsystem_shutdown() {
-	PrismContext *ctx;
-	{
-		lock_guard<mutex> lock(g_prism_mutex);
-		ctx = g_prism_context;
-		g_prism_context = nullptr;
-	}
-	prism_shutdown(ctx);
 }
 
 // Receives synthesized audio from prism_backend_speak_to_memory. Prism may invoke it any number of times and from any thread, but guarantees no further calls once speak_to_memory returns, so nothing more than an accumulator is needed.
