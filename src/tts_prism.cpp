@@ -36,11 +36,26 @@ using namespace std;
 // Global prism context, shared by every prism backed engine and created on first use.
 static mutex g_prism_mutex;
 static PrismContext *g_prism_context = nullptr;
+static PrismAvailabilityCallback g_availability_callback = nullptr;
+static void *g_availability_userdata = nullptr;
+
+// Registers the background availability callback the context will use. Must be called before the first prism_get_context to take effect (the callback is a context creation parameter); the platform layers call this from their engine registration.
+void prism_set_availability_callback(PrismAvailabilityCallback callback, void *userdata) {
+	lock_guard<mutex> lock(g_prism_mutex);
+	g_availability_callback = callback;
+	g_availability_userdata = userdata;
+}
 
 PrismContext *prism_get_context() {
 	lock_guard<mutex> lock(g_prism_mutex);
 	if (!g_prism_context) {
 		PrismConfig config = prism_config_init();
+		// Availability push: the poll thread samples every backend and invokes the callback on confirmed transitions, so the platform layers keep their cached state correct without probing from their own threads. 100 ms base interval, every change confirmed immediately, no backoff: detection stays at ~100 ms forever, and the probes are cheap bus name queries.
+		config.availability_callback = g_availability_callback;
+		config.availability_userdata = g_availability_userdata;
+		config.availability_poll_interval_ms = 100;
+		config.availability_debounce_samples = 1;
+		config.availability_backoff_max_ms = 0;
 		g_prism_context = prism_init(&config);
 	}
 	return g_prism_context;

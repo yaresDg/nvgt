@@ -28,6 +28,9 @@ struct prism_engine_mapping {
 };
 void prism_register_tts_engines(const prism_engine_mapping *map, size_t count);
 
+// Registers the background availability callback the prism context will use (see the prism manual, background availability enumeration). Must be called before the first prism_get_context; the context's poll thread then invokes the callback from prism's own thread whenever a backend transitions between available and unavailable, so platform layers never need to probe availability from their own threads.
+void prism_set_availability_callback(PrismAvailabilityCallback callback, void *userdata);
+
 // Returns the global prism context, creating it on first use. Thread safe.
 PrismContext *prism_get_context();
 

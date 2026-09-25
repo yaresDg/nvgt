@@ -29,13 +29,18 @@ using namespace std;
 // Screen reader layer
 // ============================================================================
 
-// Prism's screen reader backends are synchronous: the orca backend in particular blocks in D-Bus calls until the reader answers, and the script thread must never make those calls itself: while it waits it cannot service our own window's accessibility tree, so a reader inspecting our window at that exact moment (orca does so on every keystroke) deadlocks against this process and gets killed by the desktop's watchdog. Every prism call below therefore runs on a dedicated worker thread: speech, braille and silence are fire and forget, and the queries are answered from the state the worker caches whenever it selects or loses a backend. While no reader is selected the queries also schedule a throttled reselection on the worker, so a reader that starts later is picked up on a following call.
+// Prism's screen reader backends are synchronous: the orca backend in particular blocks in D-Bus calls until the reader answers, and the script thread must never make those calls itself — not even the cheap selection probes, because when the reader's bus name is owned they turn into synchronous calls to the reader, and against a reader that is starting up or inspecting our window (orca does so on every keystroke) they block the script thread until the reader's watchdog kills it. Every prism call below therefore runs on a dedicated worker thread. Three mechanisms keep that cheap and lossless: prism's background availability poll (configured in tts_prism.cpp, callback below) pushes a refresh job to the worker whenever orca appears or vanishes, so the cache tracks reality without anyone probing at call time; output calls are fire and forget, so navigation is never slowed by the reader's pace; and if a delivery fails because the reader died in the gap before the poll noticed, the worker re-speaks that message through speech dispatcher, so nothing is ever lost. An output call made while no reader is installed waits, bounded and via condition variables only, for the reselection it triggers — the one case where waiting is what picks the message up.
 static PrismBackendId g_sr_backend_ids[] = {
 	PRISM_BACKEND_ORCA,
 };
 
+// Used only by the worker's delivery-failure fallback: if the reader died between the cache check and a call, the message is re-spoken through speech dispatcher (the same engine the screen reader itself uses for output) instead of being dropped.
+static PrismBackendId g_sr_fallback_ids[] = {
+	PRISM_BACKEND_SPEECH_DISPATCHER,
+};
+
 struct sr_job {
-	enum class kind { select, speak, output, braille, stop };
+	enum class kind { refresh, select, speak, output, braille, stop };
 	kind action;
 	string text;
 	bool interrupt = false;
@@ -51,7 +56,13 @@ struct sr_shared {
 	string name;
 	uint64_t features = 0;
 	chrono::steady_clock::time_point last_select; // Throttles reselection while no reader is installed.
+	uint64_t select_requested = 0; // Bumped each time a select job is queued.
+	uint64_t select_done = 0; // Bumped by the worker after each select job finishes, successfully or not.
+	condition_variable select_cv; // Wakes bounded waiters when a reselection completes.
 };
+
+static void sr_release();
+static PrismBackend *sr_select();
 
 // Returns the immortal shared state, allocating it on first use. The pointer static is a raw pointer so no destructor ever runs on it: static teardown at exit() must not free anything the worker may still be using.
 static sr_shared &sr() {
@@ -60,6 +71,21 @@ static sr_shared &sr() {
 }
 
 static void sr_worker_loop();
+
+// Pushed to the front of the queue whenever prism's availability poll thread reports that orca appeared or vanished: the worker then re-probes and brings the cache back in line with reality without any script thread ever having to detect the change by failing.
+static void sr_refresh() {
+	// Worker only: drops a possibly stale cache and publishes orca again if it is there.
+	sr_release();
+	sr_select();
+}
+
+// The availability callback. Runs on prism's poll thread, which must never be blocked, so the only work done here is queueing a refresh for the worker. Transitions for anything but the reader we care about are ignored.
+static void sr_availability_changed(void *userdata, PrismBackendId backend, const char *name, bool available) {
+	if (backend != PRISM_BACKEND_ORCA) return;
+	lock_guard<mutex> lock(sr().mutex);
+	sr().queue.push_front(sr_job{sr_job::kind::refresh, string(), false});
+	sr().cv.notify_one();
+}
 
 // Releases the cached screen reader backend after a failed call.
 static void sr_release() {
@@ -99,7 +125,7 @@ static PrismBackend *sr_backend_for_job() {
 	return sr_select();
 }
 
-// Performs one output job on the worker. A job whose call fails with an invalidating error drops the backend so the next job selects afresh.
+// Performs one output job on the worker. If the delivery fails because the reader vanished between the cache check and the call, the very message is re-spoken through the speech dispatcher backend, so nothing is ever lost: the script already got true, and this is exactly the fallback it would have chosen, done inside the layer so the script thread never has to wait for delivery results.
 static void sr_perform(const sr_job &job) {
 	PrismBackend *backend = sr_backend_for_job();
 	if (!backend) return;
@@ -111,7 +137,15 @@ static void sr_perform(const sr_job &job) {
 		case sr_job::kind::stop: err = prism_backend_stop(backend); break;
 		default: return;
 	}
-	if (prism_sr_error_invalidates(err)) sr_release();
+	if (!prism_sr_error_invalidates(err)) return;
+	sr_release(); // The backend that just failed is not trustworthy.
+	if (job.action != sr_job::kind::speak && job.action != sr_job::kind::output) return;
+	uint64_t features = 0;
+	string name;
+	PrismBackend *fallback = prism_sr_select(prism_get_context(), g_sr_fallback_ids, sizeof(g_sr_fallback_ids) / sizeof(g_sr_fallback_ids[0]), features, name);
+	if (!fallback) return; // No voice anywhere either; the message is dropped as a last resort.
+	(void)prism_backend_speak(fallback, job.text.c_str(), job.interrupt);
+	prism_backend_free(fallback);
 }
 
 // The worker: drains the queue forever, keeping every prism call off the script thread. It is never joined: whatever its last call is doing, the process simply outlives it.
@@ -125,6 +159,17 @@ static void sr_worker_loop() {
 			sr().queue.pop_front();
 		}
 		try {
+			if (job.action == sr_job::kind::refresh) {
+				sr_refresh(); // prism's poll thread told us the reader appeared or vanished; sync the cache.
+				continue;
+			}
+			if (job.action == sr_job::kind::select) {
+				sr_select(); // Publishes the cache on success; the selection probe is a worker-only call.
+				lock_guard<mutex> lock(sr().mutex);
+				sr().select_done++;
+				sr().select_cv.notify_all(); // Release whoever is bounded-waiting on this reselection.
+				continue;
+			}
 			sr_perform(job);
 		} catch (...) {
 			sr_release(); // Nothing that failed inside a prism call may escape this thread function: an uncaught exception in a std::thread aborts the whole process.
@@ -138,13 +183,14 @@ static void sr_start_worker_locked() {
 	sr().worker = new thread(sr_worker_loop); // Deliberately never joined, see sr().
 }
 
-// Schedules a selection on the worker, throttled to one attempt per second: with no reader installed, scanning the registry on every call would probe its backends nonstop. Must be called with sr().mutex held.
+// Schedules a selection on the worker, throttled to one attempt per 250 ms: with no reader installed, scanning the registry on every call would probe its backends nonstop, but a reader that appears must be picked up by the next output call, not several calls later. Must be called with sr().mutex held.
 static void sr_request_select_locked() {
-	if (chrono::steady_clock::now() - sr().last_select < chrono::milliseconds(1000)) return;
+	if (chrono::steady_clock::now() - sr().last_select < chrono::milliseconds(250)) return;
 	sr().last_select = chrono::steady_clock::now();
 	sr_start_worker_locked();
 	if (sr().queue.size() >= 32) sr().queue.pop_front(); // If the reader cannot keep up, the oldest pending work is dropped in favor of the newest.
 	sr().queue.push_back(sr_job{sr_job::kind::select, string(), false});
+	sr().select_requested++;
 	sr().cv.notify_one();
 }
 
@@ -156,6 +202,35 @@ static bool sr_state(uint64_t &features) {
 		return true;
 	}
 	sr_request_select_locked();
+	return false;
+}
+
+// Like sr_state, but when no reader is cached it also waits — bounded, and only on the condition variable, never on prism — for a reselection to finish, so the output call that notices a reader appear is the one that delivers to it instead of falling back while the worker catches up. Output calls bypass the reselection throttle: the fallback that made the script land here just proved the reader is flapping, so the very next output must get a fresh probe even if another one ran less than 250 ms ago; the probe is a worker-only pair of bus name queries, cheap at any keypress rate.
+static bool sr_state_wait(uint64_t &features) {
+	if (sr_state(features)) return true;
+	uint64_t gen;
+	{
+		lock_guard<mutex> lock(sr().mutex);
+		if (sr().backend) {
+			features = sr().features;
+			return true;
+		}
+		if (sr().select_requested == sr().select_done) {
+			sr().last_select = chrono::steady_clock::now();
+			sr_start_worker_locked();
+			if (sr().queue.size() >= 32) sr().queue.pop_front();
+			sr().queue.push_back(sr_job{sr_job::kind::select, string(), false});
+			sr().select_requested++;
+			sr().cv.notify_one();
+		}
+		gen = sr().select_requested;
+	}
+	unique_lock<mutex> lock(sr().mutex);
+	sr().select_cv.wait_for(lock, chrono::milliseconds(500), [&] { return sr().select_done >= gen; });
+	if (sr().backend) {
+		features = sr().features;
+		return true;
+	}
 	return false;
 }
 
@@ -206,10 +281,11 @@ bool screen_reader_is_speaking() {
 		return false;
 	}
 }
+// The output calls are fire and forget: enqueueing is all they do, so navigation is never slowed by the reader's pace. Two safety nets run elsewhere: prism's availability poll keeps the cache correct proactively, and the worker re-speaks any message whose delivery failed through speech dispatcher, so a message is only reported as unsent (false) when no reader was installed at the moment of the call.
 bool screen_reader_output(const std::string& text, bool interrupt) {
 	if (text.empty()) return false;
 	uint64_t features;
-	if (!sr_state(features) || !(features & PRISM_BACKEND_SUPPORTS_SPEAK)) return false;
+	if (!sr_state_wait(features) || !(features & PRISM_BACKEND_SUPPORTS_SPEAK)) return false;
 	lock_guard<mutex> lock(sr().mutex);
 	sr_job job;
 	job.action = sr_job::kind::output;
@@ -221,7 +297,7 @@ bool screen_reader_output(const std::string& text, bool interrupt) {
 bool screen_reader_speak(const std::string& text, bool interrupt) {
 	if (text.empty()) return false;
 	uint64_t features;
-	if (!sr_state(features) || !(features & PRISM_BACKEND_SUPPORTS_SPEAK)) return false;
+	if (!sr_state_wait(features) || !(features & PRISM_BACKEND_SUPPORTS_SPEAK)) return false;
 	lock_guard<mutex> lock(sr().mutex);
 	sr_job job;
 	job.action = sr_job::kind::speak;
@@ -233,7 +309,7 @@ bool screen_reader_speak(const std::string& text, bool interrupt) {
 bool screen_reader_braille(const std::string& text) {
 	if (text.empty()) return false;
 	uint64_t features;
-	if (!sr_state(features) || !(features & PRISM_BACKEND_SUPPORTS_BRAILLE)) return false;
+	if (!sr_state_wait(features) || !(features & PRISM_BACKEND_SUPPORTS_BRAILLE)) return false;
 	lock_guard<mutex> lock(sr().mutex);
 	sr_job job;
 	job.action = sr_job::kind::braille;
@@ -243,7 +319,7 @@ bool screen_reader_braille(const std::string& text) {
 }
 bool screen_reader_silence() {
 	uint64_t features;
-	if (!sr_state(features)) return false;
+	if (!sr_state_wait(features)) return false;
 	if (!(features & PRISM_BACKEND_SUPPORTS_STOP)) return true; // A reader that cannot be stopped is silent as far as the script cares.
 	lock_guard<mutex> lock(sr().mutex);
 	sr_enqueue_locked(sr_job{sr_job::kind::stop, string(), false});
@@ -259,6 +335,8 @@ static const prism_engine_mapping g_engine_map[] = {
 	{"spiel", PRISM_BACKEND_SPIEL},
 };
 void register_native_tts() {
+	// Must precede the first prism_get_context: the availability callback is a context creation parameter and is what keeps the reader cache correct without anyone probing.
+	prism_set_availability_callback(sr_availability_changed, nullptr);
 	prism_register_tts_engines(g_engine_map, sizeof(g_engine_map) / sizeof(g_engine_map[0]));
 	// Kick an initial screen reader selection so the cached state is accurate by the time the script makes its first announcement.
 	sr_request_select();
