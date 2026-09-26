@@ -19,9 +19,6 @@
 #include <prism.h>
 #include <string>
 
-// Registers one NVGT tts engine for every mapping in the caller's table that the connected prism build actually contains.
-// Engines are registered under their long standing NVGT names (sapi5, speechd, etc) for script compatibility, regardless of which implementation is behind them.
-// Each platform owns its own mapping table and calls this from its register_native_tts() implementation, listing the engines in the order they should be preferred.
 struct prism_engine_mapping {
 	const char *nvgt_name;
 	PrismBackendId backend_id;
@@ -34,8 +31,6 @@ void prism_set_availability_callback(PrismAvailabilityCallback callback, void *u
 // Returns the global prism context, creating it on first use. Thread safe.
 PrismContext *prism_get_context();
 
-// Shared screen reader plumbing used by the platform layers (win.cpp, linux.cpp). The strategy is platform specific (synchronous prism calls on windows; a worker thread on linux, where synchronous D-Bus calls from the script thread can deadlock against the reader), but selecting a backend and classifying its errors are the same everywhere.
-// Attempts to select the highest priority screen reader backend that initializes, in the registry's own priority order, restricted to the caller's candidate ids. On success it copies the backend's feature mask and name and returns it, ownership transferring to the caller; otherwise it returns nullptr.
 PrismBackend *prism_sr_select(PrismContext *ctx, const PrismBackendId *ids, size_t id_count, uint64_t &features, std::string &name);
 // Reports whether an error returned by a screen reader backend call means the backend is permanently broken and must be released so the next call selects afresh; unimplemented operations and ordinary failures keep it.
 bool prism_sr_error_invalidates(PrismError err);

@@ -157,7 +157,6 @@ public:
 		return err == PRISM_OK || err == PRISM_ERROR_NOT_SPEAKING; // Not speaking is a successful stop as far as tts_voice is concerned.
 	}
 
-	// Prism normalizes speech parameters to 0..1 with the default at 0.5, so the engine ranges reported here simply are that range and the standard range_convert_midpoint conversion performed by tts_voice maps NVGT's -10..10 rate/pitch and -100..0 volume scales onto it losslessly.
 	bool get_rate_range(float& minimum, float& midpoint, float& maximum) override {
 		if (!backend || !has_feature(PRISM_BACKEND_SUPPORTS_SET_RATE)) return false;
 		minimum = 0; midpoint = 0.5f; maximum = 1;
@@ -258,13 +257,10 @@ void prism_register_tts_engines(const prism_engine_mapping *map, size_t count) {
 // Screen reader plumbing used by the platform layers
 // ============================================================================
 
-// A reader dying or its environment vanishing (NVDA exited, UIA window destroyed, orca's bus name went away) leaves a cached backend permanently broken, so those errors release it and the next call detects afresh. Unimplemented operations are normal per backend and keep the cache. SpeakFailure is included because a reader that vanishes mid run surfaces exactly as the Glib::Error the Orca backend translates into SpeakFailure; without it a cached backend would keep claiming a working reader and swallow every announcement. EnteredUndefinedState is included because prism's own documentation says the caller should re-initialize from scratch after it.
 bool prism_sr_error_invalidates(PrismError err) {
 	return err == PRISM_ERROR_BACKEND_NOT_AVAILABLE || err == PRISM_ERROR_INTERNAL || err == PRISM_ERROR_NOT_INITIALIZED || err == PRISM_ERROR_SPEAK_FAILURE || err == PRISM_ERROR_BACKEND_ENTERED_UNDEFINED_STATE;
 }
 
-// Attempts to select the highest priority screen reader backend that initializes, in the registry's own priority order, restricted to the caller's candidate ids. On success it copies the backend's feature mask and name and returns it, ownership transferring to the caller; otherwise it returns nullptr.
-// This loop cannot be delegated to prism_registry_acquire_best: a frozen registry is always a superset of the global one, so best-first selection would fall through to plain TTS backends, and the screen reader layer must never speak through plain TTS. Restricting the candidates to the reader ids is the smallest correct equivalent.
 PrismBackend *prism_sr_select(PrismContext *ctx, const PrismBackendId *ids, size_t id_count, uint64_t &features, std::string &name) {
 	size_t count = prism_registry_count(ctx);
 	for (size_t i = 0; i < count; i++) {

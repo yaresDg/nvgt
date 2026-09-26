@@ -216,24 +216,35 @@ static bool sr_state(uint64_t &features) {
 
 // Like sr_state, but when no reader is cached it also waits — bounded, and only on the condition variable, never on prism — for a reselection to finish, so the output call that notices a reader appear is the one that delivers to it instead of falling back while the worker catches up.
 static bool sr_state_wait(uint64_t &features) {
-	if (sr_state(features)) return true;
-	uint64_t gen;
-	{
-		lock_guard<mutex> lock(sr().mutex);
-		if (sr().backend) {
-			features = sr().features;
-			return true;
-		}
-		if (sr().select_requested == sr().select_done) sr_enqueue_select_locked(); // Same enqueue as sr_request_select_locked but ignoring its throttle: the fallback that made the script land here just proved the reader is flapping, so the very next output must get a fresh probe even if another one ran less than 250 ms ago; the probe is a worker-only pair of bus name queries, cheap at any keypress rate.
-		gen = sr().select_requested;
-	}
-	unique_lock<mutex> lock(sr().mutex);
-	sr().select_cv.wait_for(lock, chrono::milliseconds(500), [&] { return sr().select_done >= gen; });
-	if (sr().backend) {
-		features = sr().features;
-		return true;
-	}
-	return false;
+    {
+        lock_guard<mutex> lock(sr().mutex);
+        if (sr().backend) {
+            features = sr().features;
+            return true;
+        }
+        if (sr().select_requested == sr().select_done) {
+            sr_enqueue_select_locked(); // Forzamos selección si el anterior ya terminó (flapping)
+        } else {
+            sr_request_select_locked();
+        }
+    }
+    
+    uint64_t gen;
+    {
+        lock_guard<mutex> lock(sr().mutex);
+        gen = sr().select_requested;
+    }
+    
+    unique_lock<mutex> lock(sr().mutex);
+    sr().select_cv.wait_for(lock, chrono::milliseconds(500), [&] { 
+        return sr().select_done >= gen || sr().backend != nullptr; 
+    });
+    
+    if (sr().backend) {
+        features = sr().features;
+        return true;
+    }
+    return false;
 }
 
 static void sr_request_select() {
@@ -276,7 +287,6 @@ bool screen_reader_is_speaking() {
 		return false;
 	}
 }
-// The output calls are fire and forget: enqueueing is all they do, so navigation is never slowed by the reader's pace. Two safety nets run elsewhere: prism's availability poll keeps the cache correct proactively, and the worker re-speaks any message whose delivery failed through speech dispatcher, so a message is only reported as unsent (false) when no reader was installed at the moment of the call.
 bool screen_reader_output(const std::string& text, bool interrupt) {
 	if (text.empty()) return false;
 	uint64_t features;
@@ -327,7 +337,6 @@ bool screen_reader_silence() {
 
 static const prism_engine_mapping g_engine_map[] = {
 	{"speechd", PRISM_BACKEND_SPEECH_DISPATCHER},
-	{"spiel", PRISM_BACKEND_SPIEL},
 };
 void register_native_tts() {
 	// Must precede the first prism_get_context: the availability callback is a context creation parameter and is what keeps the reader cache correct without anyone probing.
