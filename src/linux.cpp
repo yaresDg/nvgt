@@ -13,7 +13,6 @@
 #if !defined(__ANDROID__) && (defined(__linux__) || defined(__unix__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) || defined(__DragonFly__))
 #include <chrono>
 #include <condition_variable>
-#include <cstdlib>
 #include <deque>
 #include <mutex>
 #include <string>
@@ -183,15 +182,25 @@ static void sr_start_worker_locked() {
 	sr().worker = new thread(sr_worker_loop); // Deliberately never joined, see sr().
 }
 
+// Must be called with sr().mutex held.
+static void sr_enqueue_locked(const sr_job &job) {
+	if (sr().queue.size() >= 32) sr().queue.pop_front(); // If the reader cannot keep up, the oldest pending work is dropped in favor of the newest.
+	sr().queue.push_back(job);
+	sr().cv.notify_one();
+}
+
+// Enqueues a selection on the worker and updates the bookkeeping that bounded waiters watch. Must be called with sr().mutex held.
+static void sr_enqueue_select_locked() {
+	sr().last_select = chrono::steady_clock::now();
+	sr_start_worker_locked();
+	sr_enqueue_locked(sr_job{sr_job::kind::select, string(), false});
+	sr().select_requested++;
+}
+
 // Schedules a selection on the worker, throttled to one attempt per 250 ms: with no reader installed, scanning the registry on every call would probe its backends nonstop, but a reader that appears must be picked up by the next output call, not several calls later. Must be called with sr().mutex held.
 static void sr_request_select_locked() {
 	if (chrono::steady_clock::now() - sr().last_select < chrono::milliseconds(250)) return;
-	sr().last_select = chrono::steady_clock::now();
-	sr_start_worker_locked();
-	if (sr().queue.size() >= 32) sr().queue.pop_front(); // If the reader cannot keep up, the oldest pending work is dropped in favor of the newest.
-	sr().queue.push_back(sr_job{sr_job::kind::select, string(), false});
-	sr().select_requested++;
-	sr().cv.notify_one();
+	sr_enqueue_select_locked();
 }
 
 // Copies the cached feature mask for the script visible queries and, while no reader is selected, schedules the throttled reselection that picks up a reader started later.
@@ -205,7 +214,7 @@ static bool sr_state(uint64_t &features) {
 	return false;
 }
 
-// Like sr_state, but when no reader is cached it also waits — bounded, and only on the condition variable, never on prism — for a reselection to finish, so the output call that notices a reader appear is the one that delivers to it instead of falling back while the worker catches up. Output calls bypass the reselection throttle: the fallback that made the script land here just proved the reader is flapping, so the very next output must get a fresh probe even if another one ran less than 250 ms ago; the probe is a worker-only pair of bus name queries, cheap at any keypress rate.
+// Like sr_state, but when no reader is cached it also waits — bounded, and only on the condition variable, never on prism — for a reselection to finish, so the output call that notices a reader appear is the one that delivers to it instead of falling back while the worker catches up.
 static bool sr_state_wait(uint64_t &features) {
 	if (sr_state(features)) return true;
 	uint64_t gen;
@@ -215,14 +224,7 @@ static bool sr_state_wait(uint64_t &features) {
 			features = sr().features;
 			return true;
 		}
-		if (sr().select_requested == sr().select_done) {
-			sr().last_select = chrono::steady_clock::now();
-			sr_start_worker_locked();
-			if (sr().queue.size() >= 32) sr().queue.pop_front();
-			sr().queue.push_back(sr_job{sr_job::kind::select, string(), false});
-			sr().select_requested++;
-			sr().cv.notify_one();
-		}
+		if (sr().select_requested == sr().select_done) sr_enqueue_select_locked(); // Same enqueue as sr_request_select_locked but ignoring its throttle: the fallback that made the script land here just proved the reader is flapping, so the very next output must get a fresh probe even if another one ran less than 250 ms ago; the probe is a worker-only pair of bus name queries, cheap at any keypress rate.
 		gen = sr().select_requested;
 	}
 	unique_lock<mutex> lock(sr().mutex);
@@ -232,13 +234,6 @@ static bool sr_state_wait(uint64_t &features) {
 		return true;
 	}
 	return false;
-}
-
-// Must be called with sr().mutex held, after sr_state confirmed a reader with the wanted feature.
-static void sr_enqueue_locked(const sr_job &job) {
-	if (sr().queue.size() >= 32) sr().queue.pop_front();
-	sr().queue.push_back(job);
-	sr().cv.notify_one();
 }
 
 static void sr_request_select() {
