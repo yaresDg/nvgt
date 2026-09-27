@@ -12,9 +12,10 @@
 
 #pragma once
 // This module adapts the prism library (https://github.com/ethindp/prism) to NVGT's engine based text to speech system.
+// It also hosts the entire screen reader communication layer on prism platforms: the screen_reader_* functions declared in tts.h are implemented here, and the platform files (win.cpp, linux.cpp) contribute nothing but their prioritized backend id lists via prism_sr_platform_ids.
 // It is only compiled on platforms for which prism provides backends, for now that is windows and linux/bsd.
 
-#if defined(_WIN32) || (!defined(__ANDROID__) && (defined(__linux__) || defined(__unix__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) || defined(__DragonFly__)))
+#if defined(_WIN32) || (!defined(__ANDROID__) && !defined(__APPLE__) && (defined(__linux__) || defined(__unix__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) || defined(__DragonFly__)))
 
 #include <prism.h>
 #include <string>
@@ -25,14 +26,10 @@ struct prism_engine_mapping {
 };
 void prism_register_tts_engines(const prism_engine_mapping *map, size_t count);
 
-// Registers the background availability callback the prism context will use (see the prism manual, background availability enumeration). Must be called before the first prism_get_context; the context's poll thread then invokes the callback from prism's own thread whenever a backend transitions between available and unavailable, so platform layers never need to probe availability from their own threads.
-void prism_set_availability_callback(PrismAvailabilityCallback callback, void *userdata);
-
 // Returns the global prism context, creating it on first use. Thread safe.
 PrismContext *prism_get_context();
 
-PrismBackend *prism_sr_select(PrismContext *ctx, const PrismBackendId *ids, size_t id_count, uint64_t &features, std::string &name);
-// Reports whether an error returned by a screen reader backend call means the backend is permanently broken and must be released so the next call selects afresh; unimplemented operations and ordinary failures keep it.
-bool prism_sr_error_invalidates(PrismError err);
+// Implemented by the platform layer (win.cpp, linux.cpp). Returns this platform's prioritized screen reader backend candidates; consulted lazily by the screen reader layer on first use, so there is no registration order to worry about.
+void prism_sr_platform_ids(const PrismBackendId *&ids, size_t &count);
 
 #endif

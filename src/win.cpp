@@ -1,4 +1,4 @@
-/* win.cpp - code that only gets built when compiling for windows, things like prism engine registration, screen reader detection, keyhooks etc
+/* win.cpp - code that only gets built when compiling for windows, things like prism engine registration, keyhooks etc (the screen reader layer lives in tts_prism.cpp, this file only provides its backend id list)
  *
  * NVGT - NonVisual Gaming Toolkit
  * Copyright (c) 2022-2025 Sam Tupy
@@ -21,7 +21,6 @@
 #include <memory>
 #include <atomic>
 #include <chrono>
-#include <mutex>
 #include <fstream>
 #include <ctime>
 #include <iomanip>
@@ -36,139 +35,21 @@ static const prism_engine_mapping g_engine_map[] = {
 };
 void register_native_tts() { prism_register_tts_engines(g_engine_map, sizeof(g_engine_map) / sizeof(g_engine_map[0])); }
 
-// ============================================================================
-// Screen reader layer
-// ============================================================================
-
-static PrismBackendId g_sr_backend_ids[] = {
-	PRISM_BACKEND_NVDA,
-	PRISM_BACKEND_JAWS,
-	PRISM_BACKEND_ZDSR,
-	PRISM_BACKEND_ZOOM_TEXT,
-	PRISM_BACKEND_BOY_PC_READER,
-	PRISM_BACKEND_PC_TALKER,
-	PRISM_BACKEND_SENSE_READER,
-	PRISM_BACKEND_SYSTEM_ACCESS,
-	PRISM_BACKEND_WINDOW_EYES,
-};
-
-static mutex g_sr_mutex; // Prism backends are not thread safe and script calls can arrive from any thread.
-static PrismBackend *g_sr_backend = nullptr;
-static string g_sr_name;
-static uint64_t g_sr_features = 0;
-
-// Releases the cached screen reader backend. Must be called with g_sr_mutex held.
-static void sr_release_locked() {
-	if (!g_sr_backend) return;
-	(void)prism_backend_stop(g_sr_backend);
-	prism_backend_free(g_sr_backend);
-	g_sr_backend = nullptr;
-	g_sr_name.clear();
-	g_sr_features = 0;
-}
-
-// Returns the cached reader, selecting one first if needed. Must be called with g_sr_mutex held.
-static PrismBackend *sr_ensure_locked() {
-	if (!g_sr_backend) {
-		uint64_t features = 0;
-		string name;
-		PrismBackend *backend = prism_sr_select(prism_get_context(), g_sr_backend_ids, sizeof(g_sr_backend_ids) / sizeof(g_sr_backend_ids[0]), features, name);
-		if (backend) {
-			g_sr_backend = backend;
-			g_sr_features = features;
-			g_sr_name = name;
-		}
-	}
-	return g_sr_backend;
-}
-
-bool screen_reader_load() {
-	lock_guard<mutex> lock(g_sr_mutex);
-	return sr_ensure_locked() != nullptr;
-}
-void screen_reader_unload() {
-	lock_guard<mutex> lock(g_sr_mutex);
-	sr_release_locked();
-}
-std::string screen_reader_detect() {
-	lock_guard<mutex> lock(g_sr_mutex);
-	if (!sr_ensure_locked()) return std::string();
-	return g_sr_name;
-}
-bool screen_reader_has_speech() {
-	lock_guard<mutex> lock(g_sr_mutex);
-	return sr_ensure_locked() != nullptr && (g_sr_features & PRISM_BACKEND_SUPPORTS_SPEAK) != 0;
-}
-bool screen_reader_has_braille() {
-	lock_guard<mutex> lock(g_sr_mutex);
-	return sr_ensure_locked() != nullptr && (g_sr_features & PRISM_BACKEND_SUPPORTS_BRAILLE) != 0;
-}
-bool screen_reader_is_speaking() {
-	lock_guard<mutex> lock(g_sr_mutex);
-	// No selecting just to answer this, and backends that cannot report it (orca) report not speaking.
-	if (!g_sr_backend || !(g_sr_features & PRISM_BACKEND_SUPPORTS_IS_SPEAKING)) return false;
-	try {
-		bool speaking = false;
-		return prism_backend_is_speaking(g_sr_backend, &speaking) == PRISM_OK && speaking;
-	} catch (...) {
-		sr_release_locked(); // The backend that threw is not trustworthy.
-		return false;
-	}
-}
-bool screen_reader_output(const std::string& text, bool interrupt) {
-	if (text.empty()) return false;
-	lock_guard<mutex> lock(g_sr_mutex);
-	PrismBackend *backend = sr_ensure_locked();
-	if (!backend || !(g_sr_features & PRISM_BACKEND_SUPPORTS_SPEAK)) return false;
-	try {
-		PrismError err = prism_backend_output(backend, text.c_str(), interrupt);
-		if (prism_sr_error_invalidates(err)) sr_release_locked();
-		return err == PRISM_OK;
-	} catch (...) {
-		sr_release_locked(); // The backend that threw is not trustworthy.
-		return false;
-	}
-}
-bool screen_reader_speak(const std::string& text, bool interrupt) {
-	if (text.empty()) return false;
-	lock_guard<mutex> lock(g_sr_mutex);
-	PrismBackend *backend = sr_ensure_locked();
-	if (!backend || !(g_sr_features & PRISM_BACKEND_SUPPORTS_SPEAK)) return false;
-	try {
-		PrismError err = prism_backend_speak(backend, text.c_str(), interrupt);
-		if (prism_sr_error_invalidates(err)) sr_release_locked();
-		return err == PRISM_OK;
-	} catch (...) {
-		sr_release_locked(); // The backend that threw is not trustworthy.
-		return false;
-	}
-}
-bool screen_reader_braille(const std::string& text) {
-	if (text.empty()) return false;
-	lock_guard<mutex> lock(g_sr_mutex);
-	PrismBackend *backend = sr_ensure_locked();
-	if (!backend || !(g_sr_features & PRISM_BACKEND_SUPPORTS_BRAILLE)) return false;
-	try {
-		PrismError err = prism_backend_braille(backend, text.c_str());
-		if (prism_sr_error_invalidates(err)) sr_release_locked();
-		return err == PRISM_OK;
-	} catch (...) {
-		sr_release_locked(); // The backend that threw is not trustworthy.
-		return false;
-	}
-}
-bool screen_reader_silence() {
-	lock_guard<mutex> lock(g_sr_mutex);
-	if (!g_sr_backend) return false;
-	if (!(g_sr_features & PRISM_BACKEND_SUPPORTS_STOP)) return true; // A reader that cannot be stopped is silent as far as the script cares.
-	try {
-		PrismError err = prism_backend_stop(g_sr_backend);
-		if (prism_sr_error_invalidates(err)) sr_release_locked();
-		return err == PRISM_OK || err == PRISM_ERROR_NOT_SPEAKING; // Not speaking is a successful stop as far as tts_voice is concerned.
-	} catch (...) {
-		sr_release_locked(); // The backend that threw is not trustworthy.
-		return false;
-	}
+// This platform's prioritized screen reader candidates, consumed by the shared screen reader layer in tts_prism.cpp.
+void prism_sr_platform_ids(const PrismBackendId *&ids, size_t &count) {
+	static const PrismBackendId sr_ids[] = {
+		PRISM_BACKEND_NVDA,
+		PRISM_BACKEND_JAWS,
+		PRISM_BACKEND_ZDSR,
+		PRISM_BACKEND_ZOOM_TEXT,
+		PRISM_BACKEND_BOY_PC_READER,
+		PRISM_BACKEND_PC_TALKER,
+		PRISM_BACKEND_SENSE_READER,
+		PRISM_BACKEND_SYSTEM_ACCESS,
+		PRISM_BACKEND_WINDOW_EYES,
+	};
+	ids = sr_ids;
+	count = sizeof(sr_ids) / sizeof(sr_ids[0]);
 }
 
 // Thanks Quentin Cosendey (Universal Speech) for this jaws keyboard hook code as well as to male-srdiecko and silak for various improvements and fixes that have taken place since initial implementation.
