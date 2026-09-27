@@ -65,8 +65,11 @@ elif env["NVGT_TARGET"] == "ios":
 	env.Append(CCFLAGS = ["-arch", "arm64", "-xobjective-c++"], LINKFLAGS = ["-arch", "arm64"], LIBS=["mysofa", "pffft"])
 	env["FRAMEWORKPREFIX"] = "-weak_framework"
 elif env["NVGT_TARGET"] == "linux":
-	# enable the gold linker, strip the resulting binaries, and add /usr/local/lib to the libpath because it seems we aren't finding libraries unless we do manually.
-	env.Append(CPPPATH = ["lindev/include", "/usr/local/include"], LIBPATH = ["lindev/lib", "/usr/local/lib", "/usr/lib", "/usr/lib/x86_64-linux-gnu"], LINKFLAGS = ["-fuse-ld=gold", "-g" if ARGUMENTS.get("debug", 0) == "1" else "-s"])
+	# strip the resulting binaries, and add /usr/local/lib to the libpath because it seems we aren't finding libraries unless we do manually.
+	# use the gold linker only if it exists, as recent binutils releases (e.g. recent fedora) no longer ship it.
+	linkflags = ["-g" if ARGUMENTS.get("debug", 0) == "1" else "-s"]
+	if env.Detect("ld.gold"): linkflags = ["-fuse-ld=gold"] + linkflags
+	env.Append(CPPPATH = ["lindev/include", "/usr/local/include"], LIBPATH = ["lindev/lib", "/usr/local/lib", "/usr/lib64", "/usr/lib", "/usr/lib/x86_64-linux-gnu"], LINKFLAGS = linkflags)
 elif env["NVGT_TARGET"] == "android":
 	SConscript("build/android_sconscript.py", exports = ["env"])
 	env.Append(LIBS = common_libs + ["z", "GLESv1_CM", "GLESv2", "OpenSLES", "log", "android"])
@@ -110,7 +113,9 @@ if  ARGUMENTS.get("no_plugins", "0") == "0":
 # Project libraries
 env.Append(LIBS = ["deps"] + common_libs + ["zs" if env["NVGT_TARGET"] == "windows" else "z", "SDL3", "phonon", "ASAddon"])
 if env["NVGT_TARGET"] == "windows": env.Append(LIBS = ["prism", "byctrl", "PCTalker", "PrismOrcaBridge", "PrismSpeechDispatcherBridge", "ZDSR"])
-elif env["NVGT_TARGET"] == "linux": env.Append(LIBS = ["prism", "speechd", "giomm-2.68", "glibmm-2.68", "sigc-3.0", "gio-2.0", "gmodule-2.0", "gobject-2.0", "glib-2.0"])
+elif env["NVGT_TARGET"] == "linux":
+	# prism's orca backend (giomm/glibmm) and speech dispatcher support. The glib family must be listed explicitly (the linker will not resolve symbols needed by static archives such as libspeechd.a through transitive DT_NEEDED entries), and is expected to come from the system's shared glib/glibmm, not from static libraries in lindev.
+	env.Append(LIBS = ["prism", "speechd", "giomm-2.68", "glibmm-2.68", "sigc-3.0", "gio-2.0", "gmodule-2.0", "gobject-2.0", "glib-2.0"])
 
 # nvgt itself
 sources = [str(i)[4:] for i in Glob("src/*.cpp")]
