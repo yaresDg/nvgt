@@ -37,15 +37,15 @@ void register_native_tts() { prism_register_tts_engines(g_engine_map, sizeof(g_e
 
 void prism_sr_platform_ids(const PrismBackendId *&ids, size_t &count) {
 	static const PrismBackendId sr_ids[] = {
-		PRISM_BACKEND_NVDA,
 		PRISM_BACKEND_JAWS,
-		PRISM_BACKEND_ZDSR,
+		PRISM_BACKEND_WINDOW_EYES,
+		PRISM_BACKEND_NVDA,
+		PRISM_BACKEND_SYSTEM_ACCESS,
 		PRISM_BACKEND_ZOOM_TEXT,
+		PRISM_BACKEND_ZDSR,
 		PRISM_BACKEND_BOY_PC_READER,
 		PRISM_BACKEND_PC_TALKER,
 		PRISM_BACKEND_SENSE_READER,
-		PRISM_BACKEND_SYSTEM_ACCESS,
-		PRISM_BACKEND_WINDOW_EYES,
 	};
 	ids = sr_ids;
 	count = sizeof(sr_ids) / sizeof(sr_ids[0]);

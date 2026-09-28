@@ -35,10 +35,17 @@ using namespace std;
 static mutex g_prism_mutex;
 static PrismContext *g_prism_context = nullptr;
 
+static void PRISM_CALL prism_sr_availability_changed(void *userdata, PrismBackendId backend, const char *name, bool available);
+
 PrismContext *prism_get_context() {
 	lock_guard<mutex> lock(g_prism_mutex);
 	if (!g_prism_context) {
 		PrismConfig config = prism_config_init();
+		config.availability_callback = prism_sr_availability_changed;
+		config.availability_poll_interval_ms = 100;
+		config.availability_debounce_samples = 1;
+		config.availability_backoff_max_ms = 0;
+		config.availability_auto_power_manage = true;
 		g_prism_context = prism_init(&config);
 	}
 	return g_prism_context;
@@ -83,6 +90,7 @@ public:
 	}
 
 	~prism_tts_engine() override {
+		lock_guard<mutex> lock(backend_mutex);
 		if (!backend) return;
 		(void)prism_backend_stop(backend);
 		prism_backend_free(backend);
@@ -100,7 +108,6 @@ public:
 		pcm_accumulator accumulator;
 		PrismError err = prism_backend_speak_to_memory(backend, text.c_str(), pcm_accumulate, &accumulator);
 		if (err != PRISM_OK || accumulator.samples.empty() || !accumulator.channels || !accumulator.sample_rate) return nullptr;
-		// Convert to 16 bit PCM, the format tts_voice and NVGT's audio pipeline expect from tts engines.
 		unsigned int size_in_bytes = (unsigned int)(accumulator.samples.size() * 2);
 		int16_t *data = (int16_t *)malloc(size_in_bytes);
 		if (!data) return nullptr;
@@ -137,7 +144,7 @@ public:
 		if (!backend || !has_feature(PRISM_BACKEND_SUPPORTS_STOP)) return tts_engine_impl::stop();
 		lock_guard<mutex> lock(backend_mutex);
 		PrismError err = prism_backend_stop(backend);
-		return err == PRISM_OK || err == PRISM_ERROR_NOT_SPEAKING; // Not speaking is a successful stop as far as tts_voice is concerned.
+		return err == PRISM_OK || err == PRISM_ERROR_NOT_SPEAKING;
 	}
 
 	bool get_rate_range(float& minimum, float& midpoint, float& maximum) override {
@@ -244,21 +251,22 @@ static bool prism_sr_error_invalidates(PrismError err) {
 	return err == PRISM_ERROR_BACKEND_NOT_AVAILABLE || err == PRISM_ERROR_INTERNAL || err == PRISM_ERROR_NOT_INITIALIZED || err == PRISM_ERROR_SPEAK_FAILURE || err == PRISM_ERROR_BACKEND_ENTERED_UNDEFINED_STATE;
 }
 
-static PrismBackend *prism_sr_select(PrismContext *ctx, const PrismBackendId *ids, size_t id_count, uint64_t &features, std::string &name) {
+static PrismBackend *prism_sr_select(PrismContext *ctx, const PrismBackendId *ids, size_t id_count, PrismBackendId &selected_id, uint64_t &features, std::string &name) {
 	for (size_t i = 0; i < id_count; i++) {
 		if (!prism_registry_exists(ctx, ids[i])) continue;
 		PrismBackend *backend = prism_registry_create(ctx, ids[i]);
 		if (!backend) continue;
-		if (prism_backend_initialize(backend) != PRISM_OK) {
-			prism_backend_free(backend);
-			continue;
-		}
 		uint64_t mask = prism_backend_get_features(backend);
 		if (!(mask & PRISM_BACKEND_IS_SUPPORTED_AT_RUNTIME)) {
 			prism_backend_free(backend);
 			continue;
 		}
+		if (prism_backend_initialize(backend) != PRISM_OK) {
+			prism_backend_free(backend);
+			continue;
+		}
 		const char *backend_name = prism_backend_name(backend);
+		selected_id = ids[i];
 		features = mask;
 		name = backend_name ? backend_name : "";
 		return backend;
@@ -268,6 +276,7 @@ static PrismBackend *prism_sr_select(PrismContext *ctx, const PrismBackendId *id
 
 static mutex g_sr_mutex;
 static PrismBackend *g_sr_backend = nullptr;
+static PrismBackendId g_sr_id = PRISM_BACKEND_INVALID;
 static string g_sr_name;
 static uint64_t g_sr_features = 0;
 
@@ -276,8 +285,21 @@ static void sr_release_locked() {
 	(void)prism_backend_stop(g_sr_backend);
 	prism_backend_free(g_sr_backend);
 	g_sr_backend = nullptr;
+	g_sr_id = PRISM_BACKEND_INVALID;
 	g_sr_name.clear();
 	g_sr_features = 0;
+}
+
+static void PRISM_CALL prism_sr_availability_changed(void *, PrismBackendId backend, const char *, bool available) {
+	const PrismBackendId *ids = nullptr;
+	size_t id_count = 0;
+	prism_sr_platform_ids(ids, id_count);
+	bool is_screen_reader = false;
+	for (size_t i = 0; i < id_count && !is_screen_reader; i++) is_screen_reader = ids[i] == backend;
+	if (!is_screen_reader) return;
+	lock_guard<mutex> lock(g_sr_mutex);
+	if (available || !g_sr_backend || backend != g_sr_id) return;
+	sr_release_locked();
 }
 
 static PrismBackend *sr_ensure_locked() {
@@ -287,7 +309,7 @@ static PrismBackend *sr_ensure_locked() {
 		prism_sr_platform_ids(ids, id_count);
 		uint64_t features = 0;
 		string name;
-		PrismBackend *backend = prism_sr_select(prism_get_context(), ids, id_count, features, name);
+		PrismBackend *backend = prism_sr_select(prism_get_context(), ids, id_count, g_sr_id, features, name);
 		if (backend) {
 			g_sr_backend = backend;
 			g_sr_features = features;
@@ -321,68 +343,43 @@ bool screen_reader_has_braille() {
 bool screen_reader_is_speaking() {
 	lock_guard<mutex> lock(g_sr_mutex);
 	if (!g_sr_backend || !(g_sr_features & PRISM_BACKEND_SUPPORTS_IS_SPEAKING)) return false;
-	try {
-		bool speaking = false;
-		return prism_backend_is_speaking(g_sr_backend, &speaking) == PRISM_OK && speaking;
-	} catch (...) {
-		sr_release_locked();
-		return false;
-	}
+	bool speaking = false;
+	return prism_backend_is_speaking(g_sr_backend, &speaking) == PRISM_OK && speaking;
 }
 bool screen_reader_output(const std::string& text, bool interrupt) {
 	if (text.empty()) return false;
 	lock_guard<mutex> lock(g_sr_mutex);
 	PrismBackend *backend = sr_ensure_locked();
 	if (!backend || !(g_sr_features & PRISM_BACKEND_SUPPORTS_SPEAK)) return false;
-	try {
-		PrismError err = prism_backend_output(backend, text.c_str(), interrupt);
-		if (prism_sr_error_invalidates(err)) sr_release_locked();
-		return err == PRISM_OK;
-	} catch (...) {
-		sr_release_locked();
-		return false;
-	}
+	PrismError err = prism_backend_output(backend, text.c_str(), interrupt);
+	if (prism_sr_error_invalidates(err)) sr_release_locked();
+	return err == PRISM_OK;
 }
 bool screen_reader_speak(const std::string& text, bool interrupt) {
 	if (text.empty()) return false;
 	lock_guard<mutex> lock(g_sr_mutex);
 	PrismBackend *backend = sr_ensure_locked();
 	if (!backend || !(g_sr_features & PRISM_BACKEND_SUPPORTS_SPEAK)) return false;
-	try {
-		PrismError err = prism_backend_speak(backend, text.c_str(), interrupt);
-		if (prism_sr_error_invalidates(err)) sr_release_locked();
-		return err == PRISM_OK;
-	} catch (...) {
-		sr_release_locked();
-		return false;
-	}
+	PrismError err = prism_backend_speak(backend, text.c_str(), interrupt);
+	if (prism_sr_error_invalidates(err)) sr_release_locked();
+	return err == PRISM_OK;
 }
 bool screen_reader_braille(const std::string& text) {
 	if (text.empty()) return false;
 	lock_guard<mutex> lock(g_sr_mutex);
 	PrismBackend *backend = sr_ensure_locked();
 	if (!backend || !(g_sr_features & PRISM_BACKEND_SUPPORTS_BRAILLE)) return false;
-	try {
-		PrismError err = prism_backend_braille(backend, text.c_str());
-		if (prism_sr_error_invalidates(err)) sr_release_locked();
-		return err == PRISM_OK;
-	} catch (...) {
-		sr_release_locked();
-		return false;
-	}
+	PrismError err = prism_backend_braille(backend, text.c_str());
+	if (prism_sr_error_invalidates(err)) sr_release_locked();
+	return err == PRISM_OK;
 }
 bool screen_reader_silence() {
 	lock_guard<mutex> lock(g_sr_mutex);
 	if (!g_sr_backend) return false;
 	if (!(g_sr_features & PRISM_BACKEND_SUPPORTS_STOP)) return true;
-	try {
-		PrismError err = prism_backend_stop(g_sr_backend);
-		if (prism_sr_error_invalidates(err)) sr_release_locked();
-		return err == PRISM_OK || err == PRISM_ERROR_NOT_SPEAKING;
-	} catch (...) {
-		sr_release_locked();
-		return false;
-	}
+	PrismError err = prism_backend_stop(g_sr_backend);
+	if (prism_sr_error_invalidates(err)) sr_release_locked();
+	return err == PRISM_OK || err == PRISM_ERROR_NOT_SPEAKING;
 }
 
 #endif
