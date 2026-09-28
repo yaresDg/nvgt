@@ -1,7 +1,7 @@
 /* tts_prism.h - header for the prism backed text to speech adapter
  *
  * NVGT - NonVisual Gaming Toolkit
- * Copyright (c) 2026 Sam Tupy
+ * Copyright (c) 2022 - 2026 Sam Tupy
  * https://nvgt.dev
  * This software is provided "as-is", without any express or implied warranty. In no event will the authors be held liable for any damages arising from the use of this software.
  * Permission is granted to anyone to use this software for any purpose, including commercial applications, and to alter it and redistribute it freely, subject to the following restrictions:
@@ -12,7 +12,6 @@
 
 #pragma once
 // This module adapts the prism library (https://github.com/ethindp/prism) to NVGT's engine based text to speech system.
-// It also hosts the entire screen reader communication layer on prism platforms: the screen_reader_* functions declared in tts.h are implemented here, and the platform files (win.cpp, linux.cpp) contribute nothing but their prioritized backend id lists via prism_sr_platform_ids.
 // It is only compiled on platforms for which prism provides backends, for now that is windows and linux/bsd.
 
 #if defined(_WIN32) || (!defined(__ANDROID__) && !defined(__APPLE__) && (defined(__linux__) || defined(__unix__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) || defined(__DragonFly__)))
@@ -26,10 +25,8 @@ struct prism_engine_mapping {
 };
 void prism_register_tts_engines(const prism_engine_mapping *map, size_t count);
 
-// Returns the global prism context, creating it on first use. Thread safe.
 PrismContext *prism_get_context();
 
-// Implemented by the platform layer (win.cpp, linux.cpp). Returns this platform's prioritized screen reader backend candidates; consulted lazily by the screen reader layer on first use, so there is no registration order to worry about.
 void prism_sr_platform_ids(const PrismBackendId *&ids, size_t &count);
 
 #endif

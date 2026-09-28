@@ -1,7 +1,6 @@
 /* tts_prism.cpp - adapter between the prism speech library and NVGT's engine based text to speech system
- * Prism (https://github.com/ethindp/prism) provides the actual platform speech backends (SAPI, OneCore, Speech Dispatcher, etc).
- * This file translates between prism's C API and NVGT's tts_engine interface and hosts the entire screen reader communication layer: the screen_reader_* functions declared in tts.h are implemented here, with the platform files (win.cpp, linux.cpp) contributing only their prioritized backend id lists via prism_sr_platform_ids; everything else (voice aggregation, scheduling, playback of synthesized audio) keeps belonging to tts.cpp.
- * Engines are registered under their long standing NVGT names so that existing scripts keep working, see the engine map at the bottom of this file.
+ * Prism (https://github.com/ethindp/prism) provides the actual platform speech and backends (SAPI, Speech Dispatcher, etc).
+ * This file translates between prism's C API and NVGT's tts_engine interface and hosts the entire screen reader communication layer.
  *
  * NVGT - NonVisual Gaming Toolkit
  * Copyright (c) 2026 Sam Tupy
@@ -33,7 +32,6 @@
 
 using namespace std;
 
-// Global prism context, shared by every prism backed engine and created on first use.
 static mutex g_prism_mutex;
 static PrismContext *g_prism_context = nullptr;
 
@@ -46,7 +44,7 @@ PrismContext *prism_get_context() {
 	return g_prism_context;
 }
 
-// Receives synthesized audio from prism_backend_speak_to_memory. Prism may invoke it any number of times and from any thread, but guarantees no further calls once speak_to_memory returns, so nothing more than an accumulator is needed.
+// Receives synthesized audio from prism_backend_speak_to_memory
 struct pcm_accumulator {
 	vector<float> samples;
 	size_t channels = 0;
@@ -65,7 +63,7 @@ static void PRISM_CALL pcm_accumulate(void *userdata, const float *samples, size
 class prism_tts_engine : public tts_engine_impl {
 	PrismBackend *backend;
 	uint64_t features;
-	mutable mutex backend_mutex; // Prism backends are not thread safe and engine calls can arrive from any script thread.
+	mutable mutex backend_mutex;
 
 	bool has_feature(uint64_t feature) const { return (features & feature) != 0; }
 
@@ -239,15 +237,13 @@ void prism_register_tts_engines(const prism_engine_mapping *map, size_t count) {
 }
 
 // ============================================================================
-// Screen reader layer (the screen_reader_* functions declared in tts.h)
+// Screen reader layer
 // ============================================================================
 
-// Reports whether an error returned by a screen reader backend call means the backend is permanently broken and must be released so the next call selects afresh; unimplemented operations and ordinary failures keep it.
 static bool prism_sr_error_invalidates(PrismError err) {
 	return err == PRISM_ERROR_BACKEND_NOT_AVAILABLE || err == PRISM_ERROR_INTERNAL || err == PRISM_ERROR_NOT_INITIALIZED || err == PRISM_ERROR_SPEAK_FAILURE || err == PRISM_ERROR_BACKEND_ENTERED_UNDEFINED_STATE;
 }
 
-// Selects the highest priority candidate that initializes. The platform's id order is authoritative: the outer loop walks the candidate list, so the first entry that both exists in prism's registry and comes up at runtime wins.
 static PrismBackend *prism_sr_select(PrismContext *ctx, const PrismBackendId *ids, size_t id_count, uint64_t &features, std::string &name) {
 	for (size_t i = 0; i < id_count; i++) {
 		if (!prism_registry_exists(ctx, ids[i])) continue;
@@ -270,12 +266,11 @@ static PrismBackend *prism_sr_select(PrismContext *ctx, const PrismBackendId *id
 	return nullptr;
 }
 
-static mutex g_sr_mutex; // Prism backends are not thread safe and script calls can arrive from any thread.
+static mutex g_sr_mutex;
 static PrismBackend *g_sr_backend = nullptr;
 static string g_sr_name;
 static uint64_t g_sr_features = 0;
 
-// Releases the cached screen reader backend. Must be called with g_sr_mutex held.
 static void sr_release_locked() {
 	if (!g_sr_backend) return;
 	(void)prism_backend_stop(g_sr_backend);
@@ -285,7 +280,6 @@ static void sr_release_locked() {
 	g_sr_features = 0;
 }
 
-// Returns the cached reader, selecting one first if needed. Must be called with g_sr_mutex held.
 static PrismBackend *sr_ensure_locked() {
 	if (!g_sr_backend) {
 		const PrismBackendId *ids = nullptr;
@@ -326,13 +320,12 @@ bool screen_reader_has_braille() {
 }
 bool screen_reader_is_speaking() {
 	lock_guard<mutex> lock(g_sr_mutex);
-	// No selecting just to answer this, and backends that cannot report it (orca) report not speaking.
 	if (!g_sr_backend || !(g_sr_features & PRISM_BACKEND_SUPPORTS_IS_SPEAKING)) return false;
 	try {
 		bool speaking = false;
 		return prism_backend_is_speaking(g_sr_backend, &speaking) == PRISM_OK && speaking;
 	} catch (...) {
-		sr_release_locked(); // The backend that threw is not trustworthy.
+		sr_release_locked();
 		return false;
 	}
 }
@@ -346,7 +339,7 @@ bool screen_reader_output(const std::string& text, bool interrupt) {
 		if (prism_sr_error_invalidates(err)) sr_release_locked();
 		return err == PRISM_OK;
 	} catch (...) {
-		sr_release_locked(); // The backend that threw is not trustworthy.
+		sr_release_locked();
 		return false;
 	}
 }
@@ -360,7 +353,7 @@ bool screen_reader_speak(const std::string& text, bool interrupt) {
 		if (prism_sr_error_invalidates(err)) sr_release_locked();
 		return err == PRISM_OK;
 	} catch (...) {
-		sr_release_locked(); // The backend that threw is not trustworthy.
+		sr_release_locked();
 		return false;
 	}
 }
@@ -374,20 +367,20 @@ bool screen_reader_braille(const std::string& text) {
 		if (prism_sr_error_invalidates(err)) sr_release_locked();
 		return err == PRISM_OK;
 	} catch (...) {
-		sr_release_locked(); // The backend that threw is not trustworthy.
+		sr_release_locked();
 		return false;
 	}
 }
 bool screen_reader_silence() {
 	lock_guard<mutex> lock(g_sr_mutex);
 	if (!g_sr_backend) return false;
-	if (!(g_sr_features & PRISM_BACKEND_SUPPORTS_STOP)) return true; // A reader that cannot be stopped is silent as far as the script cares.
+	if (!(g_sr_features & PRISM_BACKEND_SUPPORTS_STOP)) return true;
 	try {
 		PrismError err = prism_backend_stop(g_sr_backend);
 		if (prism_sr_error_invalidates(err)) sr_release_locked();
-		return err == PRISM_OK || err == PRISM_ERROR_NOT_SPEAKING; // Not speaking is a successful stop as far as tts_voice is concerned.
+		return err == PRISM_OK || err == PRISM_ERROR_NOT_SPEAKING;
 	} catch (...) {
-		sr_release_locked(); // The backend that threw is not trustworthy.
+		sr_release_locked();
 		return false;
 	}
 }

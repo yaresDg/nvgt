@@ -15,7 +15,12 @@
 #include "linux.h"
 #include "tts_prism.h"
 
-// This platform's prioritized screen reader candidates, consumed by the shared screen reader layer in tts_prism.cpp. Orca only: the speech dispatcher backend remains available to scripts as a tts_voice engine, it just is not treated as a screen reader.
+
+static const prism_engine_mapping g_engine_map[] = {
+	{"speechd", PRISM_BACKEND_SPEECH_DISPATCHER},
+};
+void register_native_tts() { prism_register_tts_engines(g_engine_map, sizeof(g_engine_map) / sizeof(g_engine_map[0])); }
+
 void prism_sr_platform_ids(const PrismBackendId *&ids, size_t &count) {
 	static const PrismBackendId sr_ids[] = {
 		PRISM_BACKEND_ORCA,
@@ -23,15 +28,6 @@ void prism_sr_platform_ids(const PrismBackendId *&ids, size_t &count) {
 	ids = sr_ids;
 	count = sizeof(sr_ids) / sizeof(sr_ids[0]);
 }
-
-// ============================================================================
-// Platform registration
-// ============================================================================
-
-static const prism_engine_mapping g_engine_map[] = {
-	{"speechd", PRISM_BACKEND_SPEECH_DISPATCHER},
-};
-void register_native_tts() { prism_register_tts_engines(g_engine_map, sizeof(g_engine_map) / sizeof(g_engine_map[0])); }
 
 unsigned long long system_running_milliseconds() {
 	struct timespec ts;

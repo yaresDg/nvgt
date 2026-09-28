@@ -1,4 +1,4 @@
-/* win.cpp - code that only gets built when compiling for windows, things like prism engine registration, keyhooks etc (the screen reader layer lives in tts_prism.cpp, this file only provides its backend id list)
+/* win.cpp - code that only gets built when compiling for windows, things like prism engine registration, keyhooks etc
  *
  * NVGT - NonVisual Gaming Toolkit
  * Copyright (c) 2022-2025 Sam Tupy
@@ -35,7 +35,6 @@ static const prism_engine_mapping g_engine_map[] = {
 };
 void register_native_tts() { prism_register_tts_engines(g_engine_map, sizeof(g_engine_map) / sizeof(g_engine_map[0])); }
 
-// This platform's prioritized screen reader candidates, consumed by the shared screen reader layer in tts_prism.cpp.
 void prism_sr_platform_ids(const PrismBackendId *&ids, size_t &count) {
 	static const PrismBackendId sr_ids[] = {
 		PRISM_BACKEND_NVDA,
