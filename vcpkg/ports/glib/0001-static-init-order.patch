@@ -1,0 +1,47 @@
+### diff glib/gconstructor.h
+--- a/glib/gconstructor.h	2026-05-02 09:26:52.000000000 -0300
++++ b/glib/gconstructor.h	2026-09-26 22:24:01.306560579 -0300
+@@ -52,6 +52,8 @@
+ #define G_HAS_CONSTRUCTORS 1
+ 
+ #define G_DEFINE_CONSTRUCTOR(_func) static void __attribute__((constructor)) _func (void);
++/* nvgt local patch: prioritized constructor support */
++#define G_DEFINE_CONSTRUCTOR_PRIORITY(_func, _prio) static void __attribute__((constructor(_prio))) _func (void);
+ #define G_DEFINE_DESTRUCTOR(_func) static void __attribute__((destructor)) _func (void);
+ 
+ #elif defined (_MSC_VER)
+### diff glib/glib-init.c
+--- a/glib/glib-init.c	2026-05-02 09:26:52.000000000 -0300
++++ b/glib/glib-init.c	2026-09-26 22:24:01.288675990 -0300
+@@ -511,7 +511,12 @@
+ #ifdef G_DEFINE_CONSTRUCTOR_NEEDS_PRAGMA
+ #pragma G_DEFINE_CONSTRUCTOR_PRAGMA_ARGS(glib_init_ctor)
+ #endif
+-G_DEFINE_CONSTRUCTOR(glib_init_ctor)
++/* nvgt local patch: give glib's init constructor an explicit priority so it
++   runs before C++ dynamic initializers (.init_array.65535, e.g. glibmm's
++   Glib::Class::iface_properties_quark) when glib is linked statically into
++   an executable. Plain __attribute__((constructor)) entries sort after all
++   prioritized ones, which left glib uninitialized during those initializers. */
++G_DEFINE_CONSTRUCTOR_PRIORITY(glib_init_ctor, 500)
+ 
+ static void
+ glib_init_ctor (void)
+### diff glib/gquark.c
+--- a/glib/gquark.c	2026-05-02 09:26:52.000000000 -0300
++++ b/glib/gquark.c	2026-09-26 22:19:17.492849324 -0300
+@@ -60,7 +60,13 @@
+ void
+ g_quark_init (void)
+ {
+-  g_assert (quark_seq_id == 0);
++  /* nvgt local patch: be idempotent. When glib is linked statically and a
++     C++ static initializer (e.g. glibmm's Glib::Class::iface_properties_quark)
++     calls g_quark_from_string before glib's own constructor runs, the lazy
++     init path already invoked g_quark_init; the later constructor call must
++     not assert. */
++  if (quark_seq_id != 0)
++    return;
+   quark_ht = g_hash_table_new (g_str_hash, g_str_equal);
+   quarks = g_new (gchar*, QUARK_BLOCK_SIZE);
+   quarks[0] = NULL;
