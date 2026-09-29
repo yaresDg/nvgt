@@ -114,8 +114,9 @@ if  ARGUMENTS.get("no_plugins", "0") == "0":
 env.Append(LIBS = ["deps"] + common_libs + ["zs" if env["NVGT_TARGET"] == "windows" else "z", "SDL3", "phonon", "ASAddon"])
 if env["NVGT_TARGET"] == "windows": env.Append(LIBS = ["prism", "byctrl", "PCTalker", "PrismOrcaBridge", "PrismSpeechDispatcherBridge", "ZDSR"])
 elif env["NVGT_TARGET"] == "linux":
-	# prism's orca backend (giomm/glibmm) and speech dispatcher support. The glib family must be listed explicitly (the linker will not resolve symbols needed by static archives such as libspeechd.a through transitive DT_NEEDED entries), and is expected to come from the system's shared glib/glibmm, not from static libraries in lindev.
-	env.Append(LIBS = ["prism", "speechd", "giomm-2.68", "glibmm-2.68", "sigc-3.0", "gio-2.0", "gmodule-2.0", "gobject-2.0", "glib-2.0"])
+	# prism's orca backend (giomm/glibmm) and speech dispatcher support. The glib family must be listed explicitly (the linker will not resolve symbols needed by static archives such as libspeechd.a through transitive DT_NEEDED entries). It may come from the system's shared glib/glibmm or from static libraries in lindev (built by vcpkg with our init-order patch from the ports overlay).
+	# pcre2/ffi/z are repeated after the glib family because single-pass static archive resolution needs them to follow libglib-2.0.a (gregex), libgobject-2.0.a (libffi) and libgio-2.0.a (zlib). Redundant for shared libraries, harmless either way.
+	env.Append(LIBS = ["prism", "speechd", "giomm-2.68", "glibmm-2.68", "sigc-3.0", "gio-2.0", "gmodule-2.0", "gobject-2.0", "glib-2.0", "pcre2-8", "ffi", "z"])
 
 # nvgt itself
 sources = [str(i)[4:] for i in Glob("src/*.cpp")]
